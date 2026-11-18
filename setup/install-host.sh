@@ -289,7 +289,7 @@ else
 fi
 
 step "Windows disk protection"
-# Hide the disks Windows gets (the NVMe, disk.extra) from udisks/Dolphin, so nothing on the host
+# Hide the disks Windows gets (its own drive, disk.extra) from udisks/Dolphin, so nothing on the host
 # mounts one by accident: it may belong to the running VM, or be hibernated by Windows.
 SERIALS=()
 [[ -n $SERIAL ]] && SERIALS+=("$SERIAL")

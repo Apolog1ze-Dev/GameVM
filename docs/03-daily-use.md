@@ -25,7 +25,7 @@ does not need it. The installers still run in a terminal (they ask questions and
 gamevm ui               # the window described above (--page setup opens on that page)
 gamevm start            # start Windows (iGPU mode: lists the apps that will close/reopen, asks)
 gamevm stop             # clean shutdown; the graphics card returns to Linux afterwards
-gamevm status           # VM state, which driver owns the GPU/NVMe, hugepages, CPU isolation
+gamevm status           # VM state, who has the graphics card and the Windows drive, hugepages, CPU isolation
 gamevm lg               # Windows in a window (Looking Glass, iGPU mode)
 gamevm holders          # what keeps the NVIDIA GPU busy (sudo for all users' processes)
 gamevm bench            # benchmark Windows in the VM, compared with native runs (docs/06)
@@ -47,7 +47,8 @@ The libvirt hook (`/etc/libvirt/hooks/qemu.d/gamevm`, running as root) does this
 step in `/run/gamevm/state.json` and undoes them in reverse order when Windows stops, or right away
 if a step fails:
 
-1. Checks that `gpu.devices` and `disk.nvme` are still the expected devices (IDs, serial), and
+1. Checks that `gpu.devices` and the Windows drive (`disk.nvme` or `disk.boot_disk`) are still
+   the expected devices (IDs, serial), and
    that nothing would fail later, once the desktop has moved: the running kernel can still load
    vfio-pci and the NVIDIA driver (not after a kernel update without a reboot), the VM's networks
    run, and its keyboard, mouse and extra disk are there. `gamevm start` makes the same checks
@@ -82,7 +83,8 @@ if a step fails:
 8. Confines all host processes, kernel workqueues and IRQs to cores 0 and 7. Windows gets cores
    1–6 for itself, without deep idle states, and ananicy-cpp is paused.
 
-Then libvirt binds the GPU and NVMe to vfio-pci and boots Windows. On shutdown, whether from
+Then libvirt binds the graphics card and an NVMe Windows drive to vfio-pci (a SATA Windows disk is
+opened by the VM instead) and boots Windows. On shutdown, whether from
 Linux (`gamevm stop`) or from inside Windows, everything returns: the HDMI audio function first,
 then the NVIDIA driver, then the desktop. In iGPU mode gamevm checks that the graphics card came back
 healthy, then restarts KWin on it: the main monitor shows Linux again and your chosen apps reopen. If the

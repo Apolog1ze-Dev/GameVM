@@ -1,9 +1,10 @@
 # 2. Preparing your existing Windows
 
-gamevm boots the Windows 11 that is already installed on your PC. The VM gets the whole NVMe
-drive, so Windows runs on its own NVMe driver at native speed, DirectStorage keeps its fast path,
-your games are already there, and you can still boot the same Windows natively from the firmware
-boot menu at any time.
+gamevm boots the Windows 11 that is already installed on your PC. The VM gets the whole drive
+Windows is on, so your games are already there, and you can still boot the same Windows natively
+from the firmware boot menu at any time. An NVMe drive is handed over as the hardware itself:
+Windows runs on its own NVMe driver at native speed and DirectStorage keeps its fast path. A SATA
+disk works too, in a different way (2.5).
 
 The same installation now runs on two "machines": your real board and the VM. That is fine, with
 these rules:
@@ -29,7 +30,8 @@ The gamevm window shows this as the step *Run one script in Windows*.
    .\1-prepare-windows.ps1            # add -CreateRescueAdmin for a spare local administrator
    ```
    It turns off Fast Startup and hibernation, re-enables password sign-in, blocks automatic device
-   encryption, checks the EFI fallback loader the VM boots, reports activation and the clock mode,
+   encryption, checks the EFI fallback loader the VM boots, lets Windows' standard SATA driver
+   start at boot if Windows is on a SATA disk (2.5), reports activation and the clock mode,
    installs the virtio drivers if their installer lies next to the script, and copies the scripts
    to `C:\gamevm`.
 4. If it says the clock is kept in UTC, set `clock = "utc"` under `[vm]` in
@@ -82,7 +84,7 @@ and only with your password), the firewall rules for the private link.
 ## 2.3 More disks for Windows
 
 Windows only sees the drive it boots from. A second disk with your game libraries has to be
-handed over too, as a whole, and Linux cannot use it meanwhile:
+given to it too, as a whole, and Linux cannot use it meanwhile:
 
 ```toml
 [disk]
@@ -103,11 +105,14 @@ gamevm runs whatever Windows is on the drive it hands over. For games in 2026:
 
 To install a **separate** fresh Windows instead of using your current one:
 
-1. Put another NVMe drive in. Never use the drive of your current Windows for this: installing
+1. Put another drive in. Never use the drive of your current Windows for this: installing
    erases it.
-2. In `/etc/gamevm/gamevm.toml`, set `disk.nvme` to the new drive's PCI address, and
+2. In `/etc/gamevm/gamevm.toml`, for an NVMe drive set `disk.nvme` to its PCI address, and
    `disk.expect_id` and `disk.expect_serial` to its values (`lspci -nn -s <address>`,
-   `cat /sys/class/nvme/nvme*/serial`). The hook refuses any disk that does not match them.
+   `cat /sys/class/nvme/nvme*/serial`). For a SATA disk set `disk.boot_disk` to its
+   `/dev/disk/by-id/ata-...` name and `disk.expect_serial` to its serial number
+   (`udevadm info --query=property --name=<that name> | grep ID_SERIAL_SHORT`), and leave
+   `disk.nvme` empty. The hook refuses any disk that does not match them.
 3. Download the Windows image from Microsoft and set `vm.install_iso` to its path. Windows 11
    Setup wants Secure Boot: set `firmware.secure_boot = true` after
    `sudo ./setup/install-host.sh --secure-boot`.
@@ -115,3 +120,49 @@ To install a **separate** fresh Windows instead of using your current one:
    for a network driver), then empty `vm.install_iso` again.
 
 Microsoft's licence terms count this as a second installation that needs its own licence.
+
+## 2.5 Windows on a SATA disk
+
+An NVMe drive is a device of its own, so gamevm can hand the drive itself to Windows. A SATA disk
+is not: it hangs on the board's SATA controller together with other disks, often the one Linux
+runs from. So the VM opens the whole disk instead and shows it to Windows on a standard SATA
+controller. The installer detects this by itself and writes `disk.boot_disk` instead of
+`disk.nvme`; `python3 gamevm/gamevm.py discover` shows what it found.
+
+```toml
+[disk]
+boot_disk = "/dev/disk/by-id/ata-YOUR_DISK"    # the whole disk, never a partition
+expect_serial = "..."                          # its serial number; another disk is refused
+unmount = ["/mnt/windows"]                     # where Linux mounts its partitions
+```
+
+What is the same as with an NVMe drive: nothing of Linux may be on the disk, Linux unmounts it
+and keeps its hands off while Windows runs, a hibernated Windows is refused, and the same Windows
+still boots natively.
+
+What is different:
+
+- **Speed.** Reads and writes pass through the VM instead of going straight to the hardware. A
+  SATA SSD or hard disk is slow enough that this costs little, but it uses some processor time on
+  Linux' cores, and games that use DirectStorage do not get the fast path they have on an NVMe
+  drive. TRIM reaches an SSD, and Windows is told whether the disk is an SSD or a spinning disk.
+- **The driver Windows boots with.** In the VM the disk sits on a standard SATA (AHCI) controller.
+  Every Windows has the driver for it (`storahci`), but where Windows was installed with the
+  board's SATA ports in RAID / Intel RST mode, that driver is switched off for booting.
+  `1-prepare-windows.ps1` switches it on (2.1), so run it **before** the first start in the VM.
+  Without it Windows stops with the blue screen `INACCESSIBLE_BOOT_DEVICE`; nothing is damaged,
+  boot Windows natively and run the script.
+- **Sector size.** A SATA disk in the VM always has 512-byte sectors. Nearly every SATA disk has
+  them too (also the ones with 4096-byte physical sectors, "512e"). A disk with real 4096-byte
+  sectors ("4Kn") is refused, because Windows could not read its partitions in the VM.
+- **What Windows calls the disk.** The model name is the VM's (`QEMU HARDDISK`), the serial number
+  is the real one.
+
+What gamevm checks before every start, and `gamevm doctor` at any time: the disk is there, it is
+a whole disk with the recorded serial number, it is not the disk Linux runs from (also not when a
+Linux mount point was put into `disk.unmount` by mistake), it has 512-byte sectors, nothing but
+the `disk.unmount` mount points uses it, and Windows did not leave it hibernated.
+
+Starting Windows from a SATA disk has been checked as far as it can be without such a PC: the
+VM's firmware starts a disk attached this way (`python3 -I tests/test_sata_boot.py firmware`).
+No real Windows has been started from one yet. Please report how it goes.

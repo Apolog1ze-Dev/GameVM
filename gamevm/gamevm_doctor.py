@@ -20,7 +20,6 @@ QEMU_MODULE_DIR = Path("/usr/lib/qemu")
 INSTALL_DIR = Path("/usr/local/lib/gamevm")
 HOOK = Path("/etc/libvirt/hooks/qemu.d/gamevm")
 HOST_CARD_LINK = Path("/dev/dri/gamevm-host-card")
-SAFE_MOUNTS = ("/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var")
 
 
 def _sha(path: Path) -> str:
@@ -260,7 +259,7 @@ def doctor(args, g) -> int:
         if cfg["gpu"]["expect_ids"] or cfg["disk"]["expect_serial"]:
             r.ok("GPU and Windows disk match the recorded IDs and serial number")
     except g.GameVMError as e:
-        r.fail(str(e), "fix gpu.devices / disk.nvme in /etc/gamevm/gamevm.toml (lspci -nn)")
+        r.fail(str(e), "fix gpu.devices / disk.nvme / disk.boot_disk in /etc/gamevm/gamevm.toml (lspci -nn)")
     rc, klog = _out(["journalctl", "-k", "-b", "-q", "--no-pager", "-g", "1:1 IOMMU mapping"])
     if rc == 0 and klog.strip():
         r.fail("firmware demands identity IOMMU mappings (newer BIOS DMA protection): VFIO will fail",
@@ -284,79 +283,103 @@ def doctor(args, g) -> int:
     # ------------------------------------------------------------------ disk
     r.section("Windows disk")
     nvme = cfg["disk"]["nvme"]
+    boot = cfg["disk"]["boot_disk"]
+    allowed = {os.path.normpath(m) for m in cfg["disk"]["unmount"]}
+    blk, mounts, what = [], [], ""  # the Windows drive's block devices and what is mounted from them
     if nvme:
         if not g.pci_exists(nvme):
             r.fail(f"{nvme} does not exist")
         else:
-            blk = g.block_devices_on(nvme)
+            blk, what = g.block_devices_on(nvme), nvme
             mounts = g.mounts_of(blk)
-            allowed = {os.path.normpath(m) for m in cfg["disk"]["unmount"]}
-            dangerous = [m for m in mounts if m["mountpoint"] in SAFE_MOUNTS or m["mountpoint"] == "[swap]"]
+            dangerous = [m for m in mounts if m["mountpoint"] in g.HOST_MOUNTS]
             if dangerous:
                 r.fail(f"{nvme} holds host system mounts {[m['mountpoint'] for m in dangerous]}: this is the HOST disk",
                        "set disk.nvme to the Windows NVMe")
+                mounts = []
             else:
                 extra = g.check_iommu_group(nvme, [nvme])
                 if extra:
                     r.fail(f"{nvme} shares its IOMMU group with {extra}")
                 else:
                     r.ok(f"{nvme} {g.pci_desc(nvme)}  [group {g.iommu_group(nvme)}] disks: {', '.join(b for b in blk if 'p' not in b[4:])}")
-                for m in mounts:
-                    if os.path.normpath(m["mountpoint"]) in allowed:
-                        r.ok(f"{m['mountpoint']} ({m['dev']}, {m['fstype']}) will be unmounted at VM start")
-                    else:
-                        r.fail(f"{m['dev']} is mounted on {m['mountpoint']}, which is not in disk.unmount",
-                               "unmount it or add it to disk.unmount")
-            if root and shutil.which("ntfs-3g.probe"):
-                for b in blk:
-                    rc, fstype = _out(["blkid", "-o", "value", "-s", "TYPE", f"/dev/{b}"])
-                    if fstype.strip() != "ntfs":
-                        continue
-                    rc, _ = _out(["ntfs-3g.probe", "--readwrite", f"/dev/{b}"])
-                    if rc == 14:
-                        r.fail(f"/dev/{b} is HIBERNATED (Windows Fast Startup / hibernate)",
-                               "boot Windows natively, run windows/1-prepare-windows.ps1, shut down normally")
-                    elif rc == 15:
-                        r.warn(f"/dev/{b} was not cleanly unmounted (Windows will check it)")
-                    elif rc == 16 and any(m["dev"] == b and os.path.normpath(m["mountpoint"]) in allowed for m in mounts):
-                        r.ok(f"/dev/{b} is mounted on the host; the hook unmounts it and checks hibernation at VM start")
-                    elif rc == 16:
-                        r.warn(f"/dev/{b} is in use, hibernation state not checked")
-                    elif rc == 0:
-                        r.ok(f"/dev/{b} NTFS is clean (not hibernated)")
-            elif not root:
-                hib = [m["mountpoint"] for m in mounts if os.path.exists(os.path.join(m["mountpoint"], "hiberfil.sys"))]
-                for mp in hib:
-                    r.warn(f"{mp}/hiberfil.sys exists: Windows may use Fast Startup",
-                           "sudo gamevm doctor checks it; windows/1-prepare-windows.ps1 turns it off")
-        for path in cfg["disk"]["extra"]:
-            if not os.path.exists(path):
-                r.warn(f"disk.extra {path} not found: Windows starts without it", "check the path: ls -l /dev/disk/by-id/")
-                continue
-            devs = g.disk_devices(path)
-            model = g.read(f"/sys/block/{devs[0]}/device/model") or devs[0]
-            mounts = g.mounts_of(devs)
-            allowed = {os.path.normpath(m) for m in cfg["disk"]["unmount"]}
-            foreign = [m for m in mounts if os.path.normpath(m["mountpoint"]) not in allowed]
-            if foreign:
-                r.fail(f"extra disk {devs[0]} ({model}) is in use by the host: "
-                       + ", ".join(f"{m['dev']} on {m['mountpoint']}" for m in foreign),
-                       "add those mount points to disk.unmount, or remove the disk from disk.extra")
-            else:
-                r.ok(f"extra disk {devs[0]} ({model}) goes to Windows"
-                     + (f"; {', '.join(m['mountpoint'] for m in mounts)} is unmounted while Windows runs" if mounts else ""))
-            rc, props = _out(["udevadm", "info", "--query=property", f"--name={path}"])
+    elif boot:
+        # Windows on a SATA disk: not handed over as hardware, QEMU opens the whole disk.
+        problem = g.boot_disk_problem(cfg)
+        if problem:
+            r.fail(problem, "fix disk.boot_disk in /etc/gamevm/gamevm.toml (gamevm discover shows what it finds)")
+        else:
+            blk, what = g.disk_devices(boot), boot
+            mounts = g.mounts_of(blk)
+            model = g.read(f"/sys/block/{blk[0]}/device/model").strip() or blk[0]
+            r.ok(f"{blk[0]} ({model}) is the disk Windows starts from; the VM sees it as a SATA disk")
+            if g.holders_of_block(blk):
+                r.fail(f"{blk[0]} is used by device-mapper/md ({', '.join(g.holders_of_block(blk))}): Linux is using it",
+                       "set disk.boot_disk to the Windows disk")
+            if not any(g.read(f"/sys/class/block/{b}/partition") for b in blk[1:]):
+                r.warn(f"{blk[0]} has no partitions: is Windows installed on it?")
+            rc, props = _out(["udevadm", "info", "--query=property", f"--name={boot}"])
             if rc == 0 and "UDISKS_IGNORE=1" not in props.splitlines():
-                r.warn(f"{devs[0]} is not hidden from the file manager (Dolphin could mount it while Windows uses it)",
+                r.warn(f"{blk[0]} is not hidden from the file manager (Dolphin could mount it while Windows uses it)",
                        "re-run setup/install-host.sh")
-        # KDE File Search crawling the Windows partition keeps it busy and re-checks it after every run.
-        if user:
-            for mp in map(os.path.normpath, cfg["disk"]["unmount"]):
-                if g.baloo_indexes(pwd.getpwnam(user), mp):
-                    r.warn(f"File Search (Baloo) indexes {mp}: it keeps the Windows drive busy (gamevm pauses it "
-                           "while Windows runs) and re-checks all of Windows' files after every run",
-                           f"System Settings > Search > File Search: stop indexing {mp} "
-                           f"(or: balooctl6 config remove includeFolders {mp}/)")
+    else:
+        r.warn("no drive for Windows to start from is set (disk.nvme or disk.boot_disk)",
+               "sudo ./setup/install-host.sh fills it in; `gamevm discover` shows what it finds")
+    for m in mounts:
+        if os.path.normpath(m["mountpoint"]) in allowed:
+            r.ok(f"{m['mountpoint']} ({m['dev']}, {m['fstype']}) will be unmounted at VM start")
+        else:
+            r.fail(f"{m['dev']} is mounted on {m['mountpoint']}, which is not in disk.unmount",
+                   "unmount it or add it to disk.unmount")
+    if what and root and shutil.which("ntfs-3g.probe"):
+        for b in blk:
+            rc, fstype = _out(["blkid", "-o", "value", "-s", "TYPE", f"/dev/{b}"])
+            if fstype.strip() != "ntfs":
+                continue
+            rc, _ = _out(["ntfs-3g.probe", "--readwrite", f"/dev/{b}"])
+            if rc == 14:
+                r.fail(f"/dev/{b} is HIBERNATED (Windows Fast Startup / hibernate)",
+                       "boot Windows natively, run windows/1-prepare-windows.ps1, shut down normally")
+            elif rc == 15:
+                r.warn(f"/dev/{b} was not cleanly unmounted (Windows will check it)")
+            elif rc == 16 and any(m["dev"] == b and os.path.normpath(m["mountpoint"]) in allowed for m in mounts):
+                r.ok(f"/dev/{b} is mounted on the host; the hook unmounts it and checks hibernation at VM start")
+            elif rc == 16:
+                r.warn(f"/dev/{b} is in use, hibernation state not checked")
+            elif rc == 0:
+                r.ok(f"/dev/{b} NTFS is clean (not hibernated)")
+    elif what and not root:
+        hib = [m["mountpoint"] for m in mounts if os.path.exists(os.path.join(m["mountpoint"], "hiberfil.sys"))]
+        for mp in hib:
+            r.warn(f"{mp}/hiberfil.sys exists: Windows may use Fast Startup",
+                   "sudo gamevm doctor checks it; windows/1-prepare-windows.ps1 turns it off")
+    for path in cfg["disk"]["extra"]:
+        if not os.path.exists(path):
+            r.warn(f"disk.extra {path} not found: Windows starts without it", "check the path: ls -l /dev/disk/by-id/")
+            continue
+        devs = g.disk_devices(path)
+        model = g.read(f"/sys/block/{devs[0]}/device/model") or devs[0]
+        emounts = g.mounts_of(devs)
+        foreign = [m for m in emounts if os.path.normpath(m["mountpoint"]) not in allowed]
+        if foreign:
+            r.fail(f"extra disk {devs[0]} ({model}) is in use by the host: "
+                   + ", ".join(f"{m['dev']} on {m['mountpoint']}" for m in foreign),
+                   "add those mount points to disk.unmount, or remove the disk from disk.extra")
+        else:
+            r.ok(f"extra disk {devs[0]} ({model}) goes to Windows"
+                 + (f"; {', '.join(m['mountpoint'] for m in emounts)} is unmounted while Windows runs" if emounts else ""))
+        rc, props = _out(["udevadm", "info", "--query=property", f"--name={path}"])
+        if rc == 0 and "UDISKS_IGNORE=1" not in props.splitlines():
+            r.warn(f"{devs[0]} is not hidden from the file manager (Dolphin could mount it while Windows uses it)",
+                   "re-run setup/install-host.sh")
+    # KDE File Search crawling the Windows partition keeps it busy and re-checks it after every run.
+    if user:
+        for mp in map(os.path.normpath, cfg["disk"]["unmount"]):
+            if g.baloo_indexes(pwd.getpwnam(user), mp):
+                r.warn(f"File Search (Baloo) indexes {mp}: it keeps the Windows drive busy (gamevm pauses it "
+                       "while Windows runs) and re-checks all of Windows' files after every run",
+                       f"System Settings > Search > File Search: stop indexing {mp} "
+                       f"(or: balooctl6 config remove includeFolders {mp}/)")
 
     # ------------------------------------------------------------------ USB / input
     r.section("USB and input")

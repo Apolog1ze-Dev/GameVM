@@ -3,8 +3,9 @@
 Run the Windows that is already on your PC as a virtual machine on Linux, at close to native
 speed, and get everything back the moment it shuts down.
 
-Windows gets the **whole graphics card** and its **whole NVMe drive**, so games, the Xbox app and
-PC Game Pass run on the real drivers. Linux keeps running next to it. When Windows shuts down,
+Windows gets the **whole graphics card** and the **whole drive it is installed on**, so games, the
+Xbox app and PC Game Pass run on the real graphics driver, in the Windows you already have. Linux
+keeps running next to it. When Windows shuts down,
 the graphics card, the processor cores and the memory go back to Linux, and you can still boot the
 same Windows natively whenever a game demands it.
 
@@ -17,8 +18,11 @@ gets, and moves files between the two. Everything is also a command (`gamevm sta
 
 gamevm was built and tested on **one PC**: a Ryzen 7 9800X3D with its built-in Radeon graphics, an
 RTX 4080 SUPER, KDE Plasma 6 on Wayland, CachyOS. The installer detects the hardware of the PC it
-runs on, but other hardware is untested, an Intel built-in graphics chip in particular. Expect
-rough edges, read what the installer says before you confirm, and please report what you find.
+runs on, but other hardware is untested, an Intel built-in graphics chip in particular. That PC has
+Windows on an NVMe drive: starting Windows from a SATA disk is built and checked as far as it can
+be without one (the VM's firmware starts from a disk attached that way), but no real Windows has
+been started from one yet. Expect rough edges, read what the installer says before you confirm,
+and please report what you find.
 
 It changes how your PC hands hardware to a virtual machine. It is careful (see *Safety*), every
 change can be undone, and it comes with no warranty.
@@ -28,7 +32,9 @@ change can be undone, and it comes with no warranty.
 - An **Arch-based Linux** (Arch, CachyOS, EndeavourOS, ...) with systemd; **KDE Plasma 6 on
   Wayland** if Linux should stay on screen while Windows runs.
 - An **NVIDIA graphics card**, which goes to Windows while it runs.
-- An existing **Windows 11 on an NVMe drive of its own** (not shared with Linux).
+- An existing **Windows 11 on a drive of its own** (not shared with Linux): an **NVMe drive**, which
+  Windows gets as the hardware itself, or a **SATA disk** (SSD or hard disk), which the VM shows to
+  Windows as a SATA disk.
 - Virtualisation and IOMMU switched on in the BIOS.
 - Optional, and worth it: a **second graphics chip**, usually the one built into the CPU, with a
   monitor cabled to the motherboard.
@@ -119,13 +125,14 @@ More: [daily use](docs/03-daily-use.md), [troubleshooting](docs/04-troubleshooti
   natively for those ([docs/05](docs/05-games-and-anti-cheat.md)).
 - AMD or Intel cards as the card for Windows, distributions without `pacman`, and iGPU mode on
   desktops other than KDE Plasma are not supported yet.
-- Windows on a SATA disk, or on the same drive as Linux.
+- Windows on the same drive as Linux, on a USB disk, or on a SATA disk with 4096-byte sectors
+  ("4Kn", rare; `gamevm discover` says so).
 
 ## Safety
 
 - **The Windows disk is protected.** gamevm records which drive it is (model IDs and serial
-  number) and refuses to start if anything else sits at that address, if Linux still has part of
-  it mounted, or if Windows left it hibernated (Fast Startup).
+  number) and refuses to start if another drive sits in its place, if it is the disk Linux runs
+  from, if Linux still has part of it mounted, or if Windows left it hibernated (Fast Startup).
 - **The graphics card is never torn away.** The NVIDIA driver is unloaded the regular way, which
   refuses safely if anything still uses the card.
 - **Every change to the host is written down** (`/run/gamevm/state.json`) and undone in reverse
@@ -160,6 +167,7 @@ Try things without root and without changing anything:
 
 ```bash
 ./tests/run.sh                                                   # the test suites
+python3 -I tests/test_sata_boot.py firmware                      # also: the VM's firmware starts a made-up SATA disk
 python3 gamevm/gamevm.py discover                                # what the installer would use
 python3 gamevm/gamevm.py --dry-run selftest --mode igpu          # every host change and its undo (after installing)
 GAMEVM_UI_DEMO=running python3 gamevm/gamevm.py ui               # the window with a made-up PC

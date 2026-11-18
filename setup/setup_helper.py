@@ -159,6 +159,17 @@ def cmd_fill_config(a) -> int:
         text = toml_set(text, "disk", "expect_id", f'"{vid}:{did}"')
         if serials:
             text = toml_set(text, "disk", "expect_serial", json.dumps(serials[0]))
+        text = toml_set(text, "disk", "boot_disk", '""')
+        text = toml_set(text, "disk", "unmount", toml_list(found["disk"]["unmount"]))
+    boot = found["disk"]["boot_disk"]
+    if boot:  # Windows on a SATA disk: recorded by its stable name and its serial number
+        props = subprocess.run(["udevadm", "info", "--query=property", f"--name={boot}"], capture_output=True,
+                               text=True, check=False).stdout
+        serial = re.search(r"^ID_SERIAL_SHORT=(.+)$", props, re.M)
+        text = toml_set(text, "disk", "boot_disk", json.dumps(boot))
+        text = toml_set(text, "disk", "nvme", '""')
+        text = toml_set(text, "disk", "expect_id", '""')
+        text = toml_set(text, "disk", "expect_serial", json.dumps(serial.group(1).strip() if serial else ""))
         text = toml_set(text, "disk", "unmount", toml_list(found["disk"]["unmount"]))
 
     dest.parent.mkdir(mode=0o755, parents=True, exist_ok=True)

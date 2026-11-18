@@ -9,7 +9,7 @@
 | **Processor and board** | Hardware virtualisation and an IOMMU (AMD-Vi or Intel VT-d), UEFI boot | Switched on in the BIOS, see 1.3. |
 | **Graphics card** | An NVIDIA card, used by Linux with NVIDIA's own driver | This is the card Windows gets. gamevm unloads the NVIDIA driver to hand it over; AMD and Intel cards are not supported as the card for Windows yet. |
 | **A second graphics chip** | Optional: the one built into most CPUs (AMD or Intel) | With it you get **iGPU mode**: Linux stays on screen while Windows runs. Without it, **single-GPU mode**: the Linux desktop closes while Windows runs. |
-| **Windows** | An existing Windows 11 installation on an **NVMe drive of its own** | The whole drive is handed to Windows, so nothing of Linux may be on it. Windows on a SATA disk, or on the same drive as Linux, does not work. |
+| **Windows** | An existing Windows 11 installation on a **drive of its own**: an NVMe drive or a SATA disk | The whole drive goes to Windows, so nothing of Linux may be on it. An NVMe drive is handed over as the hardware itself (native speed). A SATA disk is opened by the VM and shown to Windows as a SATA disk (see [docs/02](02-windows.md), 2.5). Windows on the same drive as Linux, on a USB disk, or on a SATA disk with 4096-byte sectors does not work. |
 | **Monitors** | iGPU mode: a monitor on the graphics card and one on the motherboard, or one monitor with a cable to each | See 1.4. |
 | **Keyboard and mouse** | USB (wired, or a wireless one with its own USB receiver) | Bluetooth keyboards and mice cannot be handed over this way. |
 

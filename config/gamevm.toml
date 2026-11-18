@@ -88,16 +88,21 @@ host_services = ["nvidia-persistenced.service", "nvidia-powerd.service"]
 mmio64_mib = 0
 
 [disk]
-# The NVMe drive with your existing Windows, as the PCI address of its controller (like
-# "0000:02:00.0"). The whole drive goes to Windows, so nothing of Linux may live on it. Set by the
-# installer.
+# The drive with your existing Windows. The whole drive goes to Windows, so nothing of Linux may
+# live on it. The installer sets one of the two:
+#   nvme       an NVMe drive, as the PCI address of its controller (like "0000:02:00.0"). The
+#              drive itself is handed to Windows, at native speed.
+#   boot_disk  a SATA disk, as its /dev/disk/by-id/ path (like "/dev/disk/by-id/ata-..."). The VM
+#              opens the whole disk and Windows sees it as a SATA disk. It needs 512-byte sectors.
 nvme = ""
-# vendor:device and serial number of that drive (filled in by the installer). The hook refuses to
-# pass the controller through if they do not match: it must never hand over the wrong disk.
+boot_disk = ""
+# What that drive is (filled in by the installer): vendor:device of an NVMe drive, and the serial
+# number of either kind. The hook refuses to start Windows if they do not match: it must never
+# hand over the wrong disk.
 expect_id = ""
 expect_serial = ""
-# Host mount points on the disks Windows gets (the NVMe and disk.extra). They are unmounted before
-# the VM starts. Any OTHER mount of those disks makes the start fail (safety).
+# Host mount points on the disks Windows gets (the Windows drive and disk.extra). They are
+# unmounted before the VM starts. Any OTHER mount of those disks makes the start fail (safety).
 unmount = []
 # Other whole disks Windows gets while it runs, by /dev/disk/by-id/ path (stable across boots),
 # e.g. a data disk with your game libraries: ["/dev/disk/by-id/ata-..."]. Linux cannot use them

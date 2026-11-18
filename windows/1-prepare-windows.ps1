@@ -19,7 +19,9 @@
          next to this script, so Windows has network the first time it boots in the VM.
       4. Blocks automatic device encryption (BitLocker would bind the disk to ONE of the two TPMs).
       5. Makes sure the disk has the EFI fallback loader (\EFI\Boot\bootx64.efi) the VM firmware boots.
-      6. Copies these scripts to C:\gamevm so they are available inside the VM.
+      6. If Windows is on a SATA disk: lets Windows' standard SATA driver start at boot, because the
+         VM shows the disk on a standard SATA controller.
+      7. Copies these scripts to C:\gamevm so they are available inside the VM.
     Checks (no changes): BitLocker, Windows version, activation, SMBIOS UUID, clock mode, Memory Integrity.
 #>
 [CmdletBinding()]
@@ -115,6 +117,50 @@ try {
         }
     }
 } finally { & mountvol.exe "$($letter):" /d }
+
+# ---------------------------------------------------------------------------------------------
+Step "Disk driver for the VM"
+# An NVMe drive goes to the VM as the drive itself, on the driver Windows already boots with. A SATA
+# disk shows up in the VM on a standard SATA (AHCI) controller instead of the board's own one, so
+# Windows' standard driver for it (storahci) must be allowed to start at boot. Where Windows was
+# installed with the SATA ports in RAID / Intel RST mode that driver is switched off for booting,
+# and Windows would stop in the VM with INACCESSIBLE_BOOT_DEVICE.
+function Enable-BootDriver($name) {
+    # $true: changed; $false: it already started at boot; $null: this Windows has no such driver
+    $svc = "HKLM:\SYSTEM\CurrentControlSet\Services\$name"
+    if (-not (Test-Path $svc)) { return $null }
+    $changed = $false
+    if ((Get-ItemProperty $svc).Start -ne 0) { Set-ItemProperty $svc -Name Start -Value 0 -Type DWord; $changed = $true }
+    $ovr = "$svc\StartOverride"
+    if (Test-Path $ovr) {
+        $key = Get-Item $ovr
+        foreach ($v in $key.GetValueNames()) {
+            if ($key.GetValue($v) -ne 0) { Set-ItemProperty $ovr -Name $v -Value 0 -Type DWord; $changed = $true }
+        }
+    }
+    return $changed
+}
+try {
+    $sys = Get-Partition -DriveLetter ($env:SystemDrive[0]) -ErrorAction Stop | Get-Disk
+    $bus = "$($sys.BusType)"
+    if ($bus -eq 'NVMe') { Ok "Windows is on an NVMe drive ($($sys.FriendlyName)): the VM gets the drive itself, nothing to change" }
+    else {
+        $r = Enable-BootDriver 'storahci'
+        if ($null -eq $r) { Warn "This Windows has no standard SATA driver (storahci): it could not start from this disk in the VM." }
+        elseif ($r) { Ok "Windows is on a $bus disk ($($sys.FriendlyName)): the standard SATA driver now starts at boot" }
+        else { Ok "Windows is on a $bus disk ($($sys.FriendlyName)): the standard SATA driver already starts at boot" }
+        if ($bus -eq 'RAID') {
+            # RAID / Intel RST mode hides what the disk really is; it may also be an NVMe drive.
+            Enable-BootDriver 'stornvme' | Out-Null
+            Warn ("The disk controller is in RAID / Intel RST mode. One plain disk works in the VM; a RAID volume " +
+                  "made of several disks does not.")
+        }
+        if ($sys.LogicalSectorSize -ne 512) {
+            Warn ("This disk has $($sys.LogicalSectorSize)-byte sectors. A SATA disk in the VM always has 512-byte " +
+                  "sectors, so Windows cannot start from it there.")
+        }
+    }
+} catch { Warn "Could not tell which kind of disk Windows is on ($($_.Exception.Message))." }
 
 # ---------------------------------------------------------------------------------------------
 Step "Real-time clock"

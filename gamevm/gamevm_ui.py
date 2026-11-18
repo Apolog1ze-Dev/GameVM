@@ -270,7 +270,7 @@ class Service:
                 import gamevm_discover
                 d = self.found = gamevm_discover.discover()
                 self.cfg = g.deep_merge(g.DEFAULTS, {
-                    "gpu": {"devices": d["gpu"]["devices"]}, "disk": {"nvme": d["disk"]["nvme"], "unmount": d["disk"]["unmount"]},
+                    "gpu": {"devices": d["gpu"]["devices"]}, "disk": {"nvme": d["disk"]["nvme"], "boot_disk": d["disk"]["boot_disk"], "unmount": d["disk"]["unmount"]},
                     "cpu": {"guest_cores": d["cpu"]["guest_cores"] or [1], "host_cores": d["cpu"]["host_cores"] or [0]},
                     "vm": {"memory_mib": d["memory_mib"]}, "input": d["input"],
                     "network": d["network"], "audio": {"user": self.user().pw_name}})
@@ -625,6 +625,8 @@ if ($u) {
         win_disks, shared = set(), set()
         if cfg["disk"]["nvme"]:
             win_disks = {p.name for p in Path(f"/sys/bus/pci/devices/{cfg['disk']['nvme']}").glob("nvme/nvme*/nvme*n*")}
+        if cfg["disk"]["boot_disk"]:  # Windows on a SATA disk
+            win_disks.add(Path(os.path.realpath(cfg["disk"]["boot_disk"])).name)
         for extra in cfg["disk"]["extra"]:
             shared.add(Path(os.path.realpath(extra)).name)
         disks = []

@@ -4,6 +4,7 @@
 # gamevm's tests. They need no VM, no root and change nothing on the machine: Windows, libvirt,
 # KDE Connect and the file manager are faked, and the configuration is a made-up PC.
 #   GAMEVM_TEST_NETWORK=1 ./tests/run.sh   also fetches 64 KiB of the driver disc from the real server
+#   python3 -I tests/test_sata_boot.py firmware   also starts the VM firmware from a made-up SATA disk
 set -u
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
 failed=0
@@ -18,6 +19,7 @@ run() {
     rm -f /tmp/gamevm-test.$$
 }
 run tests/test_discover.py
+run tests/test_sata_boot.py
 run tests/test_window.py
 run tests/test_sharing.py
 run tests/test_host_steps.py "$PWD" mock

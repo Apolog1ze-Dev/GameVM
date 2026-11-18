@@ -10,6 +10,7 @@ no kernel command-line changes.
 |---|---|---|
 | GPU | whole graphics card via VFIO, Resizable BAR (16 GiB) passed through | native driver, native performance; OVMF sizes the 64-bit MMIO window automatically |
 | Disk | the whole NVMe controller of the Windows drive via VFIO | Windows' own NVMe driver, DirectStorage/BypassIO intact, **zero host CPU per I/O** |
+| Disk (Windows on a SATA disk) | the whole disk, raw, on the VM's SATA controller; opened past Linux' file cache, native asynchronous I/O, TRIM passed on | Windows boots from it with the driver every installation has. Each read and write passes through QEMU on the host's cores, which a SATA disk is slow enough to hide for the most part |
 | CPU | whole cores with all their threads (on 8 cores: cores 1–6), `host-passthrough`, topoext, invtsc, real cache topology | the guest sees the processor's real layout and caches; whole cores avoid SMT contention with the host |
 | Host isolation (while running) | all host processes, kernel workqueues and IRQs on the host's cores | nothing on the host competes with the guest's cores |
 | Idle | deep idle states (exit latency of 100 µs or more) blocked on the guest cores | faster wake-up for guest interrupts and frames |
@@ -54,7 +55,7 @@ VM costs. `windows/3-benchmark.ps1` needs no downloads and takes about a minute:
 | mem latency | random access over 512 MiB | two-level page tables add latency; huge pages keep it small |
 | mem copy | memory bandwidth, 1 thread | close to native |
 | worst stall, stalls>100us | longest interruption of a thread spinning on each CPU | VM exits and host interrupts show up here |
-| disk read | sequential read of C: | the NVMe is passed through: native speed |
+| disk read | sequential read of C: | an NVMe drive is passed through: native speed. A SATA disk goes through the VM: expect somewhat less than native |
 
 1. **Native baseline:** boot Windows natively and, in an administrator PowerShell, run
    `Set-ExecutionPolicy -Scope Process Bypass -Force; C:\gamevm\3-benchmark.ps1`. (The first

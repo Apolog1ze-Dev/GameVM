@@ -93,8 +93,8 @@ def choose_gpus(displays: list[dict], all_pci: list[str]) -> dict:
 
 def lsblk() -> list[dict]:
     try:
-        out = subprocess.run(["lsblk", "-J", "-b", "-o", "NAME,TYPE,TRAN,MODEL,SIZE,PARTTYPE,FSTYPE,MOUNTPOINTS,UUID,"
-                              "PARTUUID,LABEL,PARTLABEL"], capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run(["lsblk", "-J", "-b", "-o", "NAME,TYPE,TRAN,MODEL,SIZE,LOG-SEC,PARTTYPE,FSTYPE,MOUNTPOINTS,"
+                              "UUID,PARTUUID,LABEL,PARTLABEL"], capture_output=True, text=True, timeout=20).stdout
         return json.loads(out or "{}").get("blockdevices", [])
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return []
@@ -114,10 +114,26 @@ def nvme_controller(disk_name: str, sys_block: Path = Path("/sys/block")) -> str
     return m[-1] if m else ""
 
 
-def choose_windows_disk(blockdevices: list[dict], controller_of=nvme_controller) -> dict:
-    """{'nvme': PCI address of the drive's controller, 'disk': its name, 'model', 'others': NTFS data
-    disks worth mentioning, 'problem'}. A Windows system disk has an EFI partition and a Microsoft
-    reserved (or recovery) partition; a data disk formatted by Windows has no EFI partition."""
+def stable_disk_path(disk_name: str, by_id: Path = Path("/dev/disk/by-id")) -> str:
+    """The name of a whole disk that stays the same across boots (sda can become sdb): the one with
+    model and serial number (ata-...) before the bare identifier (wwn-...); '' if it has none."""
+    try:
+        names = sorted(n for n in os.listdir(by_id) if "-part" not in n and os.path.basename(os.path.realpath(by_id / n)) == disk_name)
+    except OSError:
+        return ""
+    for prefix in ("ata-", "wwn-"):
+        for n in names:
+            if n.startswith(prefix):
+                return str(by_id / n)
+    return ""
+
+
+def choose_windows_disk(blockdevices: list[dict], controller_of=nvme_controller, path_of=stable_disk_path) -> dict:
+    """{'nvme': PCI address of the drive's controller (an NVMe drive is handed over as hardware),
+    'boot_disk': /dev/disk/by-id/ path (a SATA disk is opened by the VM as a whole), 'bus': 'nvme'
+    or 'sata', 'disk': its name, 'model', 'others': NTFS data disks worth mentioning, 'problem'}.
+    A Windows system disk has an EFI partition and a Microsoft reserved (or recovery) partition; a
+    data disk formatted by Windows has no EFI partition."""
     disks = [b for b in blockdevices if b.get("type") == "disk" and not b["name"].startswith(("zram", "loop"))]
 
     def kinds(disk):
@@ -133,29 +149,47 @@ def choose_windows_disk(blockdevices: list[dict], controller_of=nvme_controller)
     def label(disk):
         return f"{(disk.get('model') or disk['name']).strip()} ({disk['name']})"
 
+    def bus(disk):
+        tran = (disk.get("tran") or "").lower()
+        return "nvme" if tran == "nvme" else "sata" if tran in ("sata", "ata") else tran
+
     systems = [d for d in disks if is_windows_system(d)]
     data = [label(d) for d in disks if d not in systems and not has_linux(d)
             and any((p.get("fstype") or "") == "ntfs" for p in descendants(d))]
-    usable = [d for d in systems if (d.get("tran") or "") == "nvme" and not has_linux(d)]
-    res = {"nvme": "", "disk": "", "model": "", "others": data, "problem": ""}
-    if len(usable) == 1:
-        res.update(disk=usable[0]["name"], model=(usable[0].get("model") or "").strip(), nvme=controller_of(usable[0]["name"]))
+    usable = [d for d in systems if bus(d) in ("nvme", "sata") and not has_linux(d)]
+    res = {"nvme": "", "boot_disk": "", "bus": "", "disk": "", "model": "", "others": data, "problem": ""}
+    if len(usable) == 1 and bus(usable[0]) == "nvme":
+        res.update(disk=usable[0]["name"], model=(usable[0].get("model") or "").strip(), bus="nvme",
+                   nvme=controller_of(usable[0]["name"]))
         linux_on_same_controller = [d["name"] for d in disks if d is not usable[0] and has_linux(d)
                                     and controller_of(d["name"]) == res["nvme"] and res["nvme"]]
         if not res["nvme"]:
             res["problem"] = f"the NVMe controller of {label(usable[0])} could not be found"
         elif linux_on_same_controller:
             res.update(nvme="", problem=f"{label(usable[0])} shares its NVMe controller with the Linux disk")
+    elif len(usable) == 1:
+        # A SATA disk has no controller of its own to hand over (the board's SATA controller also
+        # carries other disks), so the VM opens the disk itself and shows it to Windows as SATA.
+        d = usable[0]
+        res.update(disk=d["name"], model=(d.get("model") or "").strip(), bus="sata", boot_disk=path_of(d["name"]))
+        sector = str(d.get("log-sec") or 512)
+        if not res["boot_disk"]:
+            res["problem"] = (f"{label(d)} has no stable name under /dev/disk/by-id/ (ata-... or wwn-...), so it cannot be "
+                              "told apart from other disks after a reboot")
+        elif sector != "512":
+            res.update(boot_disk="", problem=f"{label(d)} has {sector}-byte sectors. A SATA disk in the VM always has "
+                       "512-byte sectors, so Windows could not read its partitions there.")
     elif len(usable) > 1:
         res.update(candidates=[label(d) for d in usable], problem=
-                   "more than one NVMe drive with a Windows installation: " + ", ".join(label(d) for d in usable)
-                   + ". Put the PCI address of the right one into disk.nvme yourself.")
+                   "more than one drive with a Windows installation: " + ", ".join(label(d) for d in usable)
+                   + ". Put the right one into the configuration yourself: disk.nvme (the PCI address of an NVMe drive) "
+                   "or disk.boot_disk (the /dev/disk/by-id/ path of a SATA disk).")
     elif any(has_linux(d) for d in systems):
-        res["problem"] = ("Windows and Linux are installed on the same drive. gamevm hands the whole Windows drive to the VM, "
+        res["problem"] = ("Windows and Linux are installed on the same drive. gamevm gives the whole Windows drive to the VM, "
                           "so Windows has to be on a drive of its own.")
     elif systems:
-        res["problem"] = (f"Windows was found on {label(systems[0])}, which is not an NVMe drive. gamevm hands an NVMe "
-                          "drive to the VM as a whole; a SATA disk can be added by hand as disk.extra (docs/02-windows.md).")
+        res["problem"] = (f"Windows was found on {label(systems[0])}, which is connected through "
+                          f"{bus(systems[0]) or 'an unknown bus'}. gamevm starts Windows from an internal NVMe or SATA drive.")
     else:
         res["problem"] = "no drive with an installed Windows was found (an EFI partition plus a Microsoft reserved partition)."
     return res
@@ -302,7 +336,8 @@ def discover() -> dict:
         "gpu": {"devices": gpu["devices"], "name": pci_name(gpu["devices"][0]) if gpu["devices"] else ""},
         "host_gpu": [{"bdf": b, "name": pci_name(b)} for b in gpu["host"]],
         "mode": "igpu" if gpu["host"] else "single",
-        "disk": {"nvme": disk["nvme"], "name": disk["model"] or disk["disk"],
+        "disk": {"nvme": disk["nvme"], "boot_disk": disk["boot_disk"], "bus": disk["bus"],
+                 "name": disk["model"] or disk["disk"],
                  "unmount": mount_points_of(disk["disk"], blocks, read("/etc/fstab")) if disk["disk"] else []},
         "input": {k: inp[k] for k in ("keyboard", "mouse", "extra")},
         "cpu": {"guest_cores": split["guest_cores"], "host_cores": split["host_cores"],
@@ -323,7 +358,12 @@ def describe(d: dict) -> list[str]:
                      + "  -> iGPU mode: the Linux desktop stays on screen while Windows runs")
     else:
         lines.append("no second graphics chip -> single-GPU mode: the Linux desktop closes while Windows runs")
-    lines.append("Windows disk: " + (f"{d['disk']['name']} (NVMe controller {d['disk']['nvme']})" if d["disk"]["nvme"] else "not found"))
+    if d["disk"]["nvme"]:
+        lines.append(f"Windows disk: {d['disk']['name']} (NVMe controller {d['disk']['nvme']}, handed to Windows as hardware)")
+    elif d["disk"]["boot_disk"]:
+        lines.append(f"Windows disk: {d['disk']['name']} (SATA, {d['disk']['boot_disk']}; Windows sees it as a SATA disk)")
+    else:
+        lines.append("Windows disk: not found")
     if d["disk"]["unmount"]:
         lines.append("  mounted on Linux at: " + ", ".join(d["disk"]["unmount"]) + " (unmounted while Windows runs)")
     lines.append(f"keyboard: {d['input']['keyboard'] or 'not found'}")

@@ -129,7 +129,8 @@ DEFAULTS: dict = {
                "avic": False, "guest_idle_poll": False},
     "gpu": {"devices": [], "expect_ids": [], "host_modules": ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"],
             "host_services": ["nvidia-persistenced.service", "nvidia-powerd.service"], "mmio64_mib": 0},
-    "disk": {"nvme": "", "expect_id": "", "expect_serial": "", "unmount": [], "extra": [], "refuse_hibernated": True,
+    "disk": {"nvme": "", "boot_disk": "", "expect_id": "", "expect_serial": "", "unmount": [], "extra": [],
+             "refuse_hibernated": True,
              "remount_after_stop": True, "d3cold_off": False},
     "usb": {"controllers": [], "devices": []},
     "input": {"evdev": True, "keyboard": "", "mouse": "", "extra": [], "toggle": "ctrl-ctrl", "reattach": True},
@@ -378,6 +379,14 @@ def validate_config(cfg: dict) -> None:
     for path in cfg["disk"]["extra"]:
         if not path.startswith("/dev/disk/by-id/") or "-part" in os.path.basename(path):
             errs.append(f"disk.extra: {path} must be a whole disk under /dev/disk/by-id/ (stable across boots)")
+    boot = cfg["disk"]["boot_disk"]
+    if boot and (not boot.startswith("/dev/disk/by-id/") or "-part" in os.path.basename(boot)):
+        errs.append(f"disk.boot_disk: {boot} must be a whole disk under /dev/disk/by-id/ (stable across boots)")
+    if boot and cfg["disk"]["nvme"]:
+        errs.append("Windows starts from one drive: set disk.nvme (an NVMe drive, handed over whole) or disk.boot_disk "
+                    "(a SATA disk), not both")
+    if boot and boot in cfg["disk"]["extra"]:
+        errs.append("disk.boot_disk is also listed in disk.extra")
     for u in cfg["usb"]["devices"]:
         if not USB_ID_RE.match(u.lower()):
             errs.append(f"usb.devices: '{u}' is not VID:PID")
@@ -892,6 +901,63 @@ def nvme_serial(bdf: str) -> str:
     return ""
 
 
+# Mount points that make a disk the host's own. A disk carrying one of these never goes to Windows,
+# whatever disk.unmount says.
+HOST_MOUNTS = ("/", "/boot", "/boot/efi", "/efi", "/home", "/usr", "/var", "[swap]")
+
+
+def disk_serial(path: str) -> str:
+    """The serial number udev reports for a whole disk (ID_SERIAL_SHORT), '' if it has none."""
+    res = run(["udevadm", "info", "--query=property", f"--name={path}"], check=False, capture=True, mutate=False)
+    m = re.search(r"^ID_SERIAL_SHORT=(.+)$", res.stdout or "", re.M)
+    return m.group(1).strip() if m else ""
+
+
+def whole_disk_facts(path: str) -> dict | None:
+    """What the kernel says about the disk behind a /dev/disk/by-id/ path; None if it is not there."""
+    if not os.path.exists(path):
+        return None
+    name = os.path.basename(os.path.realpath(path))
+    q = Path(f"/sys/block/{name}/queue")
+    return {"name": name, "whole": os.path.isdir(f"/sys/block/{name}"), "serial": disk_serial(path),
+            "sector": read(q / "logical_block_size").strip() or "512",
+            "physical": read(q / "physical_block_size").strip() or "512",
+            "rotating": read(q / "rotational").strip() == "1",
+            "mounts": mounts_of(disk_devices(path))}
+
+
+def boot_disk_problem(cfg: dict) -> str:
+    """Why disk.boot_disk cannot be the drive Windows starts from; '' if it can. (A SATA disk is
+    not a PCI device of its own like an NVMe drive, so it is not handed over as hardware: QEMU
+    opens the whole disk and shows it to Windows on an emulated SATA controller.)"""
+    d = cfg["disk"]
+    boot = d["boot_disk"]
+    if not boot:
+        return ""
+    f = whole_disk_facts(boot)
+    if f is None:
+        return (f"disk.boot_disk {boot} is not there: the disk Windows starts from is missing "
+                "(unplugged, or its name changed: ls -l /dev/disk/by-id/)")
+    if not f["whole"]:
+        return f"disk.boot_disk {boot} is not a whole disk (it resolves to {f['name']})"
+    if d["expect_serial"] and f["serial"] != d["expect_serial"]:
+        return (f"{boot} has serial {f['serial'] or '(none)'}, expected {d['expect_serial']}: "
+                "this is not the Windows disk")
+    # QEMU writes to the whole disk. Linux' own disk must never be it, also not when its mount
+    # points were put into disk.unmount by mistake.
+    own = [m for m in f["mounts"] if m["mountpoint"] in HOST_MOUNTS]
+    if own:
+        return (f"disk.boot_disk {boot} is the disk Linux runs from ("
+                + ", ".join(f"{m['dev']} on {m['mountpoint']}" for m in own)
+                + "): Windows needs a disk of its own. Set disk.boot_disk to the Windows disk")
+    # QEMU's emulated SATA disk always has 512-byte sectors. A disk that really has 4096-byte
+    # sectors ("4Kn") would show Windows a partition table it cannot read.
+    if f["sector"] != "512":
+        return (f"{boot} has {f['sector']}-byte sectors: Windows cannot start from it in the VM (a SATA disk there "
+                "always has 512-byte sectors)")
+    return ""
+
+
 def verify_identity(cfg: dict) -> None:
     """PCI addresses can shift when BIOS settings or hardware change (e.g. enabling the iGPU or
     adding an M.2 drive). Refuse to pass anything through unless it is the device we expect."""
@@ -910,6 +976,9 @@ def verify_identity(cfg: dict) -> None:
         if d["expect_serial"] and serial and serial != d["expect_serial"]:
             raise GameVMError(f"{d['nvme']} has serial {serial}, expected {d['expect_serial']}: "
                               "this is not the Windows disk")
+    problem = boot_disk_problem(cfg)
+    if problem:
+        raise GameVMError(problem)
 
 
 def mount_units(path: str) -> tuple[str, str]:
@@ -1224,6 +1293,9 @@ def step_disk(cfg: dict, st: HostState) -> None:
         if cfg["disk"]["d3cold_off"]:
             # Workaround for NVMe passthrough failing with 'Unknown PCI header type 127' (D3cold).
             write_sysfs(SYS_PCI / nvme / "d3cold_allowed", "0")
+    boot = cfg["disk"]["boot_disk"]
+    if boot:  # there and the expected disk: verify_identity ran first
+        release_block_devices(cfg, st, boot, disk_devices(boot))
     for path in extra_disks(cfg):
         release_block_devices(cfg, st, path, disk_devices(path))
 
@@ -2509,6 +2581,9 @@ def start_problems(cfg: dict, mode: str, xml: str = "") -> list[str]:
         networks = wanted_networks(cfg)
         nics = [cfg["network"]["host_nic"]] if cfg["network"]["mode"] == "macvtap" else []
         paths = []  # render_xml leaves out what is missing; gamevm start asks about the keyboard
+        problem = boot_disk_problem(cfg)  # ...except the disk Windows starts from
+        if problem:
+            problems.append(problem)
         tpm, kvmfr = cfg["firmware"]["tpm"], True
     for net in filter(None, networks):
         if not network_active(net):
@@ -3043,6 +3118,22 @@ def render_xml(cfg: dict, mode: str | None = None) -> str:
             if boot:
                 a(f"      {boot}")
             a("    </disk>")
+    # disk.boot_disk: Windows on a SATA disk. The whole host disk, raw, on the machine's emulated
+    # SATA (AHCI) controller: Windows starts from that with the driver every installation has
+    # (storahci), where VirtIO would need a driver that is not there before the first start. It is
+    # always part of the definition, also when missing: a VM without its system disk must not start.
+    boot = cfg["disk"]["boot_disk"]
+    if boot:
+        f = whole_disk_facts(boot) or {"rotating": False, "physical": "512", "serial": ""}
+        a("    <disk type='block' device='disk'>")
+        a("      <driver name='qemu' type='raw' cache='none' io='native'" + ("" if f["rotating"] else " discard='unmap'") + "/>")
+        a(f"      <source dev={quoteattr(boot)}/>")
+        a(f"      <target dev='sda' bus='sata' rotation_rate='{7200 if f['rotating'] else 1}'/>")
+        a(f"      <blockio logical_block_size='512' physical_block_size='{f['physical']}'/>")
+        if f["serial"]:
+            a(f"      <serial>{escape(f['serial'][:20])}</serial>")
+        a("      <boot order='1'/>")
+        a("    </disk>")
     # disk.extra: whole host disks (e.g. the shared games HDD), raw on VirtIO SCSI, presented like
     # the real drive (serial, sector sizes, spinning or not) so Windows keeps its drive letter.
     extras = [p for p in cfg["disk"]["extra"] if os.path.exists(p)]
@@ -3052,8 +3143,7 @@ def render_xml(cfg: dict, mode: str | None = None) -> str:
         name = os.path.basename(os.path.realpath(path))
         q = Path(f"/sys/block/{name}/queue")
         rotating = read(q / "rotational") == "1"
-        serial = re.search(r"^ID_SERIAL_SHORT=(.+)$", run(["udevadm", "info", "--query=property", f"--name={path}"],
-                           check=False, capture=True, mutate=False).stdout or "", re.M)
+        serial = disk_serial(path)
         a("    <disk type='block' device='disk'>")
         a("      <driver name='qemu' type='raw' cache='none' io='native'" + ("" if rotating else " discard='unmap'") + "/>")
         a(f"      <source dev={quoteattr(path)}/>")
@@ -3061,7 +3151,7 @@ def render_xml(cfg: dict, mode: str | None = None) -> str:
         a(f"      <blockio logical_block_size='{read(q / 'logical_block_size') or 512}' "
           f"physical_block_size='{read(q / 'physical_block_size') or 512}'/>")
         if serial:
-            a(f"      <serial>{escape(serial.group(1)[:20])}</serial>")
+            a(f"      <serial>{escape(serial[:20])}</serial>")
         a("    </disk>")
     a("    <controller type='usb' model='qemu-xhci' ports='15'/>")
     for dev in cfg["usb"]["devices"]:
@@ -3528,6 +3618,10 @@ def cmd_status(args: argparse.Namespace) -> int:
                                  "unmanaged": "not managed by gamevm this boot (journalctl -b -u gamevm-kwin.service)"}[kwin_layout()])
     for bdf in cfg["gpu"]["devices"] + ([cfg["disk"]["nvme"]] if cfg["disk"]["nvme"] else []) + cfg["usb"]["controllers"]:
         print(f"pci         {bdf} -> {pci_driver(bdf) or '(no driver)'}   {pci_desc(bdf)}")
+    if cfg["disk"]["boot_disk"]:
+        boot = cfg["disk"]["boot_disk"]
+        name = os.path.basename(os.path.realpath(boot)) if os.path.exists(boot) else "(missing)"
+        print(f"boot disk   {boot} -> {name}   {boot_disk_problem(cfg) or 'SATA disk, Windows starts from it'}")
     meminfo = dict(re.findall(r"^(\w+):\s+(\d+)", read("/proc/meminfo"), re.M))
     print(f"hugepages   total {meminfo.get('HugePages_Total')} free {meminfo.get('HugePages_Free')} (2 MiB)")
     allowed = run(["systemctl", "show", "-p", "AllowedCPUs", "--value", "user.slice"], capture=True,

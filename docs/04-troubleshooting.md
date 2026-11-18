@@ -27,6 +27,10 @@ sudo cat /var/log/libvirt/qemu/win11.log # QEMU's own log
 | `KWin did not come back within 25s` | Rare. The session is still logged in; log out and back in, then `sudo gamevm recover`. |
 | `refusing to pass ... through: the host is using it` | Something mounted the Windows disk. Unmount it, or add the mount point to `disk.unmount`. |
 | `... is <id>, expected <id>: PCI numbering changed` | A BIOS/hardware change moved devices. Find the new addresses with `lspci -nn` and fix `gpu.devices` / `disk.nvme`. |
+| `disk.boot_disk ... is not there` | The SATA disk Windows starts from is unplugged, or its name changed. `ls -l /dev/disk/by-id/` shows the names; `gamevm discover` shows what gamevm would pick. |
+| `... has serial ..., expected ...: this is not the Windows disk` | Another disk sits where the Windows disk was (disks swapped or replaced). Fix `disk.boot_disk` / `disk.nvme` and `disk.expect_serial`. |
+| `disk.boot_disk ... is the disk Linux runs from` | `disk.boot_disk` points at the Linux disk. Windows needs a disk of its own; set it to the Windows disk. |
+| `... has 4096-byte sectors: Windows cannot start from it in the VM` | A SATA disk in the VM always has 512-byte sectors, so the partitions of a disk with real 4096-byte sectors cannot be read there. Windows on such a disk can only be booted natively (docs/02, 2.5). |
 | `only N of M hugepages could be allocated even after closing apps` | Windows' RAM is reserved as 2 MiB blocks that must each be physically contiguous, so free RAM can be too fragmented even when there is plenty of it. gamevm already reserves what it can before the desktop moves, then drops the file cache, compacts memory and fills the rest once apps are closed and the NVIDIA driver is unloaded. Close more programs (browsers, Steam) and start again, or set `vm.hugepages = false`: Windows then uses transparent huge pages, slightly slower but never refused. With `vm.hugepages_fallback = true` (default) gamevm does this by itself for one start when the huge pages cannot be reserved before the desktop moves. `vm.defrag_mode = 1` (set by the installer) keeps this rare. |
 | `/dev/kvmfr0 is a regular file` | QEMU created it before kvmfr was loaded: `sudo rm /dev/kvmfr0 && sudo modprobe kvmfr`. |
 | `Failed to open ... evdev` / keyboard missing | The receiver/keyboard was unplugged. Move the mouse to wake the receiver; check `ls /dev/input/by-id`. |
@@ -73,13 +77,20 @@ report an unexpected shutdown (Event Viewer → System, event 41 or 6008).
   `setup/install-host.sh`.
 - `libvirt-guests.service` must stay disabled: it would try to suspend the VM at the same time.
 
-## NVMe passthrough problems
+## Windows drive problems
 
 - `Unknown PCI header type 127` / the NVMe vanishes after a VM run: set `disk.d3cold_off = true`.
   If that does not help, boot `linux-cachyos-lts` (a 7.2.2+ regression was reported on AM5).
 - Windows Boot Manager disappeared from GRUB: grub-mkconfig ran while the disk was in the VM
   (os-prober could not see it). Run `sudo grub-mkconfig -o /boot/grub/grub.cfg` with the VM off.
   The firmware boot menu (F8, F11 or F12 at power-on, depending on the board) always works.
+- Windows on a SATA disk stops with the blue screen `INACCESSIBLE_BOOT_DEVICE` in the VM: its
+  standard SATA driver is switched off for booting (Windows was installed with the SATA ports in
+  RAID / Intel RST mode). Nothing is damaged. Boot Windows natively, run
+  `1-prepare-windows.ps1` again and shut down (docs/02, 2.5).
+- Windows on a SATA disk: the VM's firmware says *No bootable option or device was found*. The
+  disk's EFI partition has no fallback loader (`\EFI\Boot\bootx64.efi`). Boot Windows natively
+  and run `1-prepare-windows.ps1`: it checks for the file and offers to recreate it.
 
 ## Windows-side problems
 
