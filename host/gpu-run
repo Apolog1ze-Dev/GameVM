@@ -1,0 +1,23 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Karim Dagher
+# gpu-run: run a program on the NVIDIA GPU (PRIME render offload) while the desktop runs on the iGPU.
+#   gpu-run <program> [args...]
+#   Steam: set a game's launch options to   gpu-run %command%
+# The program keeps the NVIDIA GPU busy while it runs: close it before starting the Windows VM
+# (gamevm start lists such programs and offers to close them).
+if [ ! -e /proc/driver/nvidia/version ]; then
+    echo "gpu-run: the NVIDIA driver is not loaded (is the Windows VM running?); running on the iGPU" >&2
+    exec "$@"
+fi
+export __NV_PRIME_RENDER_OFFLOAD=1
+export __VK_LAYER_NV_optimus=NVIDIA_only
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json
+# Lift the session-wide Vulkan restriction instead of selecting by name: Steam's runtime
+# (pressure-vessel, used by Proton) renames the driver manifests, so a '*nvidia*' filter would match
+# nothing there and leave games without any Vulkan driver. The NVIDIA optimus layer enabled by
+# __NV_PRIME_RENDER_OFFLOAD + __VK_LAYER_NV_optimus=NVIDIA_only already limits Vulkan to the graphics card.
+unset VK_LOADER_DRIVERS_DISABLE VK_LOADER_DRIVERS_SELECT
+unset LIBVA_DRIVER_NAME VDPAU_DRIVER
+exec "$@"

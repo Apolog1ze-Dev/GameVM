@@ -1,0 +1,28 @@
+[Unit]
+Description=gamevm: shut Windows down before the host shuts down or reboots
+# Does nothing while it runs. Its job is its ExecStop at host shutdown: ask Windows to shut down
+# and wait for it (vm.host_shutdown_wait seconds at most).
+#
+# Why nothing kills QEMU meanwhile: libvirt orders every VM scope Before=virt-guest-shutdown.target,
+# so at shutdown systemd stops that target before it stops (= kills) the VM. The target is only
+# part of the shutdown when a unit requires it, and it has to wait for the units ordered after it.
+# This unit does both, the way libvirt-guests.service does (keep that one disabled, or it tries to
+# suspend the VM at the same time). After=virtqemud...: libvirt and its helpers keep running until
+# Windows is off.
+Requires=virt-guest-shutdown.target
+After=virt-guest-shutdown.target
+After=virtqemud.service virtqemud.socket virtlogd.service virtlogd.socket virtlockd.service virtlockd.socket
+After=virtnetworkd.service virtnetworkd.socket systemd-machined.service dbus.service network.target
+ConditionPathExists=/etc/gamevm/gamevm.toml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/true
+# Only acts when the host is really going down (not on a manual `systemctl stop`).
+ExecStop=/usr/local/bin/gamevm host-shutdown
+# vm.host_shutdown_wait is at most 840 s.
+TimeoutStopSec=900
+
+[Install]
+WantedBy=multi-user.target

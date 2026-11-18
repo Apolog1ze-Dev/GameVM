@@ -1,0 +1,6 @@
+# gamevm: stable, colon-free names for the graphics chip the Linux desktop keeps while Windows runs
+# (the one built into the CPU: AMD or Intel). KWIN_DRM_DEVICES / KWIN_RENDER_NODES are
+# colon-separated lists, so /dev/dri/by-path names (pci-0000:00:02.0-card) cannot be used there
+# without escaping. The NVIDIA card is never matched.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="amdgpu|i915|xe", SYMLINK+="dri/gamevm-host-card"
+SUBSYSTEM=="drm", KERNEL=="renderD[0-9]*", DRIVERS=="amdgpu|i915|xe", SYMLINK+="dri/gamevm-host-render"

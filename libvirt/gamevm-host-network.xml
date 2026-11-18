@@ -1,0 +1,14 @@
+<!-- gamevm host-only network: an isolated link between Linux and Windows (no internet, no DNS).
+     Windows' NIC on it always gets 10.77.0.2 (DHCP reservation added by the installer); the host is 10.77.0.1. Used for SSH/RDP to the host,
+     file sharing, Moonlight -> Sunshine, etc. (the macvtap NIC cannot talk to the host). -->
+<network>
+  <name>gamevm-host</name>
+  <bridge name='virbr-gamevm' stp='off' delay='0'/>
+  <dns enable='no'/>
+  <ip address='10.77.0.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.77.0.100' end='10.77.0.199'/>
+      <!-- @HOSTONLY_RESERVATION@ -->
+    </dhcp>
+  </ip>
+</network>

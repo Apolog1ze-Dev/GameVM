@@ -1,0 +1,19 @@
+[Unit]
+Description=gamevm: KWin GPU layout (main monitor through the graphics card while Windows is off)
+# iGPU mode: writes /run/systemd/user/plasma-kwin_wayland.service.d/50-gamevm.conf (and the same for
+# the login screen's KWin) plus the links in /run/gamevm/kwin, so KWin uses the graphics card as its
+# main GPU. The libvirt hook moves KWin to the iGPU while Windows runs. In single-GPU mode, with
+# --dedicated-gpu or without an iGPU it removes them, and KWin behaves as without gamevm.
+# Before user managers (lingering ones too) and the login screen start, so they read the drop-in.
+After=systemd-modules-load.service systemd-udev-trigger.service
+Before=systemd-user-sessions.service display-manager.service
+ConditionPathExists=/etc/gamevm/gamevm.toml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/gamevm kwin-boot
+TimeoutStartSec=40
+
+[Install]
+WantedBy=multi-user.target

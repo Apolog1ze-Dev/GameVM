@@ -1,0 +1,8 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-only
+# Copyright (C) 2026 Karim Dagher
+# gamevm libvirt qemu hook, installed as /etc/libvirt/hooks/qemu.d/gamevm by setup/install-host.sh.
+# libvirt calls it for every domain as: <domain> <operation> <sub-operation> <extra>, with the
+# domain XML on stdin. gamevm only acts on the domain named in /etc/gamevm/gamevm.toml.
+# Never call virsh from here: libvirt documents that this can deadlock.
+exec /usr/bin/python3 -I /usr/local/lib/gamevm/gamevm.py hook "$@"

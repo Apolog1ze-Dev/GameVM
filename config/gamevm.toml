@@ -1,0 +1,248 @@
+# gamevm configuration
+# ---------------------------------------------------------------------------------------------
+# The installed copy lives at /etc/gamevm/gamevm.toml (root-owned, because the libvirt hook runs
+# as root and reads it). After editing it:
+#     SUDO_EDITOR=nano sudoedit /etc/gamevm/gamevm.toml
+#     gamevm doctor && gamevm define
+# This file in the repo is the template. The installer fills in what it finds on your PC: the
+# graphics card and the Windows disk (with their IDs and serial number), keyboard and mouse,
+# processor cores, memory, network card, your user name. `gamevm discover` shows what that is.
+# The gamevm window (gamevm ui) edits the common values for you: Resources and Settings.
+# ---------------------------------------------------------------------------------------------
+
+[vm]
+name = "win11"
+title = "Windows 11"
+# auto   -> "igpu" if a second graphics chip (usually the one built into the CPU) is present, else "single"
+# igpu   -> the Linux desktop stays on the second chip; the graphics card is handed to Windows while it runs
+# single -> single-GPU passthrough: the Linux desktop session is closed while the VM runs
+mode = "auto"
+# Memory for Windows in MiB (the installer sets half of the PC's memory).
+memory_mib = 8192
+# Back guest RAM with 2 MiB hugepages, allocated when the VM starts and freed when it stops.
+# Each needs a physically contiguous 2 MiB block, which fragmented RAM may not have. If the log
+# (/var/log/gamevm.log) shows "only N of M hugepages available" at every start, set this to false:
+# Windows then starts on transparent huge pages at once instead of after a failed attempt.
+hugepages = true
+# If they cannot all be reserved before the desktop moves, start Windows on transparent huge pages
+# instead (slightly slower) rather than refusing. false: try again after closing apps, else refuse.
+hugepages_fallback = true
+# Domain UUID = SMBIOS system UUID seen by Windows. The installer sets it to the host's UUID (same
+# machine identity as bare metal, for activation). It also keys the VM's TPM state: never change it.
+uuid = ""
+# RTC: "localtime" (Windows default) or "utc" (if Windows has RealTimeIsUniversal=1).
+clock = "localtime"
+# Add an emulated VGA so virt-manager can show a console (rescue only: games may pick it).
+rescue_vga = false
+# virtio-win driver ISO, attached as a CD while the file exists.
+virtio_iso = "/var/lib/libvirt/images/virtio-win.iso"
+# Windows installation ISO (second boot device), only for a FRESH install on another disk
+# (docs/02-windows.md, section 2.3). Leave empty otherwise.
+install_iso = ""
+# Shutting down or rebooting the host while Windows runs shuts Windows down first. This is how long
+# the host waits for it, in seconds (30-840), before it is powered off. Windows installing updates
+# on shutdown can take minutes.
+host_shutdown_wait = 300
+
+[cpu]
+# Physical core IDs (CORE column of `lscpu -e`). Every thread of a guest core goes to Windows.
+# The installer sets both lists for your processor: Linux, QEMU's emulator and I/O keep the first
+# core, and the last one too on processors with six cores or more; Windows gets the rest.
+# Example for 8 cores: guest_cores = [1, 2, 3, 4, 5, 6] and host_cores = [0, 7].
+guest_cores = [1]
+host_cores = [0]
+# Cores for QEMU's emulator/IO threads. Empty = host_cores.
+emulator_cores = []
+# While the VM runs, confine host processes (system.slice, user.slice, init.scope) and unbound
+# kernel workqueues to host_cores, so nothing on the host competes with the guest's cores.
+isolate_host = true
+
+[tuning]
+# Steer device interrupts to the host cores while the VM runs.
+irq_affinity = true
+# Forbid idle states with an exit latency >= this many microseconds on the guest cores while the
+# VM runs (a deep C-state takes a few hundred microseconds to leave). 0 = leave idle states alone.
+block_deep_idle_us = 100
+# Pause ananicy-cpp while the VM runs, where it is installed (its rules renice QEMU to nice 9).
+pause_ananicy = true
+# EXPERIMENTS - measure before keeping them (see docs/06-performance.md):
+# AVIC (AMD): hardware-virtualised interrupts. Where the CPU or BIOS hides the AVIC CPUID bit it
+# also needs `options kvm_amd avic=1 force_avic=1` (taints the kernel). Keep false unless you test it.
+avic = false
+# Guest idles without VM exits (-overcommit cpu-pm=on): lowest latency, guest cores show 100 % busy.
+guest_idle_poll = false
+
+[gpu]
+# The graphics card for Windows: every function of it (graphics + its HDMI audio), as PCI
+# addresses like ["0000:01:00.0", "0000:01:00.1"]. Set by the installer; `gamevm discover` shows it.
+devices = []
+# vendor:device of each function above. The hook refuses to start if they differ (PCI addresses
+# can shift after BIOS or hardware changes). Filled in by the installer.
+expect_ids = []
+# Host driver modules, in unload order. Reloaded in reverse order when the VM stops.
+host_modules = ["nvidia_drm", "nvidia_modeset", "nvidia_uvm", "nvidia"]
+# Services that keep the NVIDIA device open; stopped before unload, restarted afterwards.
+host_services = ["nvidia-persistenced.service", "nvidia-powerd.service"]
+# 64-bit PCI MMIO window for OVMF in MiB. 0 = automatic (OVMF sizes it from the CPU's address
+# bits, enough for a 16 GiB Resizable BAR). Only if Windows shows Code 43 / no ReBAR: 65536.
+mmio64_mib = 0
+
+[disk]
+# The NVMe drive with your existing Windows, as the PCI address of its controller (like
+# "0000:02:00.0"). The whole drive goes to Windows, so nothing of Linux may live on it. Set by the
+# installer.
+nvme = ""
+# vendor:device and serial number of that drive (filled in by the installer). The hook refuses to
+# pass the controller through if they do not match: it must never hand over the wrong disk.
+expect_id = ""
+expect_serial = ""
+# Host mount points on the disks Windows gets (the NVMe and disk.extra). They are unmounted before
+# the VM starts. Any OTHER mount of those disks makes the start fail (safety).
+unmount = []
+# Other whole disks Windows gets while it runs, by /dev/disk/by-id/ path (stable across boots),
+# e.g. a data disk with your game libraries: ["/dev/disk/by-id/ata-..."]. Linux cannot use them
+# meanwhile; add their Linux mount points to `unmount` above.
+extra = []
+# Refuse to start if Windows left its NTFS volume hibernated (Fast Startup / hibernate).
+# Booting a hibernated image on different (virtual) hardware can corrupt it. Keep this true.
+refuse_hibernated = true
+# Mount the unmounted paths again after the VM stops (paths with an fstab automount are left to it).
+remount_after_stop = true
+# Workaround for 'Unknown PCI header type 127' when the NVMe will not wake from D3cold.
+d3cold_off = false
+
+[usb]
+# Whole USB controllers to give to Windows (must be alone in their IOMMU group). Native USB, no
+# emulation. Find which physical ports belong to one: plug a USB stick in and run `lsusb -t`.
+# Example: ["0000:0e:00.3"]. Everything plugged into that controller's ports is Windows' while it
+# runs, and Linux does not see it meanwhile.
+controllers = []
+# Individual USB devices ("vvvv:pppp") attached when the VM starts (if plugged in) and hot-pluggable
+# later with `gamevm usb attach`. Example: "045e:02fe" = Xbox Wireless Adapter.
+devices = []
+
+[input]
+# evdev passthrough: Windows gets the real keyboard/mouse with ~zero latency.
+# Press BOTH Ctrl keys to switch keyboard+mouse between Windows and Linux.
+# `sudo gamevm probe-input` shows which event node emits Ctrl: `keyboard` must be that node.
+evdev = true
+# Both are /dev/input/by-id/...-event-kbd and ...-event-mouse paths, set by the installer.
+keyboard = ""
+mouse = ""
+# Extra event devices that follow the toggle (a keyboard's second interface for media keys).
+extra = []
+# ctrl-ctrl | alt-alt | shift-shift | meta-meta | scrolllock | ctrl-scrolllock
+# (not the key in looking_glass.escape_key)
+toggle = "ctrl-ctrl"
+# While Windows runs, plug a keyboard or mouse that was unplugged and connected again (or whose
+# receiver registered anew) back into Windows by itself. Without this QEMU has lost it for the rest
+# of the session; `gamevm input` does the same by hand. Afterwards the devices are with Windows.
+reattach = true
+
+[network]
+# macvtap -> Windows gets its own address on your LAN (best for Xbox/Teredo NAT type, no host
+#            bridge to configure). The host cannot reach the guest through it, hence `hostonly`.
+# nat     -> libvirt "default" NAT network (works over Wi-Fi too).
+mode = "macvtap"
+# The network card Windows shares with Linux (the one with the default route). Set by the installer.
+host_nic = ""
+queues = 4
+# Second NIC on an isolated host<->guest network (10.77.0.1 = Linux, 10.77.0.2 = Windows; no
+# internet, no DNS) for SSH/RDP/SMB/Moonlight between the two.
+hostonly = true
+hostonly_network = "gamevm-host"
+# Fixed MAC addresses so Windows keeps the same network profile. Empty = derived from machine-id.
+mac = ""
+hostonly_mac = ""
+
+[audio]
+# pipewire -> guest audio is played by the host's PipeWire (mixes with Linux audio, works in both
+#             display modes).
+# none     -> no emulated sound card (e.g. when the headset's USB controller is passed through).
+backend = "pipewire"
+# Desktop user whose PipeWire receives guest audio.
+user = ""
+# PipeWire buffer per direction in microseconds (QEMU default 46440; lower = less lag, more risk of crackle).
+latency_us = 20000
+# false: QEMU keeps running as the unprivileged libvirt-qemu user; the hook grants it access to your
+#        PipeWire socket only while the VM runs (recommended).
+# true:  run QEMU as `user` instead (fallback if Windows has no sound; re-run setup/install-host.sh).
+qemu_as_user = false
+
+[desktop]
+# iGPU mode with the main monitor cabled ONLY to the graphics card: while Windows is off, KWin drives
+# the main monitor through the card (native Linux gaming, full refresh rate, VRR) and the side monitor
+# through the iGPU. Starting Windows restarts KWin on the iGPU alone (side monitor), stopping it
+# restarts KWin back. The session stays; Qt/KDE apps reconnect, other apps (Electron, Firefox, Steam,
+# games, GTK apps) close. gamevm keeps as much of them as a restart allows:
+# Reopen every app the restart closed ...
+relaunch_all = true
+# ... except these desktop file IDs (the .desktop file name without the extension), e.g. ["steam"].
+relaunch_exclude = []
+# With relaunch_all = false, only these are reopened:
+relaunch_autostart = true          # apps started at login (System Settings > Autostart)
+relaunch = []                      # plus these desktop file IDs, if they were running, e.g. ["discord"]
+# Before the restart, ask the apps it closes to quit by themselves and wait this many seconds, so
+# they save what they save when you quit them. 0 = let them fall with the restart, as before.
+# (Firefox-based browsers are never asked: they bring tabs back only after an unexpected end.)
+quit_timeout = 5
+# Put windows back on the monitor and at the place they had before Windows started.
+restore_windows = true
+# When Windows stops: "auto" = the desktop moves back to the main monitor at once (the apps that
+# are not KDE apps close and reopen a second time). "ask" = it stays on the side monitor and a
+# notification offers the move; `gamevm back` does it later. Linux does not use the graphics card until
+# then, and a Windows start in between needs no restart at all.
+return = "auto"
+# Seconds to wait for KWin to come back after a restart.
+restart_timeout = 25
+
+[display]
+# Only for a monitor wired to BOTH the graphics card and the motherboard (the usual way to use a
+# single monitor in iGPU mode): switch its input over DDC/CI when the VM starts and stops
+# (`gamevm view vm|host` does it by hand). Model name and input values come from
+# `ddcutil detect` and `ddcutil capabilities` (feature 60).
+switch_inputs = false
+monitor_model = ""
+vm_input = "0x0f"     # the input with the cable from the graphics card (0x0f = DisplayPort-1)
+host_input = "0x11"   # the input with the cable from the motherboard (0x11 = HDMI-1)
+
+[looking_glass]
+# Show Windows in a window on the Linux desktop (iGPU mode only).
+enabled = true
+# Must equal the Looking Glass IDD build installed in Windows (client and IDD are built together).
+build = "B7-829-cdba29f2"
+# Use the kvmfr kernel module (DMA-BUF import, required for good performance on an iGPU).
+kvmfr = true
+# Shared memory in MiB, by the resolution of the main monitor: 32 = 1080p, 64 = 1440p, 128 = 4K.
+size_mib = 64
+# SPICE (clipboard, fallback input) TCP port on 127.0.0.1.
+spice_port = 5905
+# `gamevm lg`: false = a maximised window with a title bar; true = full screen on the monitor
+# Linux has left while Windows runs, which hides the Linux desktop until you leave it.
+fullscreen = false
+# The Looking Glass escape key: tapped, it captures the mouse and lets it go; with Q it closes the
+# window, with F it switches full screen. KEY_RIGHTCTRL, KEY_SCROLLLOCK, KEY_PAUSE, ...
+# (looking-glass-client input:escapeKey=help lists them). Not the keys of input.toggle.
+escape_key = "KEY_RIGHTCTRL"
+# The window only has a picture while Windows draws on the Looking Glass virtual monitor. true =
+# `gamevm lg` makes Windows mirror its screen onto it (Win + P > Duplicate) while the window is
+# open and goes back to the main monitor alone when it closes; a layout you set yourself in which
+# the virtual monitor already takes part is left alone. false = you set the layout in Windows.
+auto_mirror = true
+
+[firmware]
+# false: the VM boots without Secure Boot, as most Linux dual-boot PCs do natively.
+# true (your PC boots Windows with Secure Boot on, or a game demands it): needs
+# `setup/install-host.sh --secure-boot` (Microsoft-keyed OVMF variable store).
+secure_boot = false
+tpm = true
+# Copy the host's SMBIOS identity (captured by the installer) into the guest.
+smbios_host = true
+
+[single_gpu]
+display_manager = "display-manager.service"
+# Seconds to wait for the desktop session to exit after stopping the display manager.
+teardown_timeout = 30
+# If the NVIDIA GPU fails to re-initialise after the VM (known nvidia-open GSP issue after unclean
+# guest stops), there is no display at all in single-GPU mode: reboot the host automatically.
+reboot_on_gpu_failure = true

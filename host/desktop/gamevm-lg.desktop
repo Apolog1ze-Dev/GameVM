@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Windows (Looking Glass)
+Comment=Show the running Windows VM in a window
+Exec=gamevm lg
+Icon=video-display
+Terminal=false
+Categories=Game;
+StartupWMClass=looking-glass-client

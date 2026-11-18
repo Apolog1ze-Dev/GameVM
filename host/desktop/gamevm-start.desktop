@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Application
+Name=gamevm
+GenericName=Windows gaming VM
+Comment=Start and stop Windows on the graphics card, set it up, choose what it gets
+Exec=gamevm ui
+Icon=computer
+Terminal=false
+Categories=Game;System;
+Keywords=windows;vm;gaming;virtual machine;
+Actions=stop;files;input;back;lookingglass;
+
+[Desktop Action stop]
+Name=Shut down Windows
+Exec=gamevm stop
+
+[Desktop Action files]
+Name=Open Windows' drives
+Exec=gamevm files
+
+[Desktop Action input]
+Name=Reconnect keyboard and mouse to Windows
+Exec=gamevm input
+
+[Desktop Action back]
+Name=Bring the Linux desktop back to the main monitor
+Exec=gamevm back
+
+[Desktop Action lookingglass]
+Name=Show Windows in a window (Looking Glass)
+Exec=gamevm lg
